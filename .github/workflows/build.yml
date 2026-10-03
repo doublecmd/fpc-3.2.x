@@ -1,124 +1,70 @@
-name: Build FPC Trunk
+name: build-snapshot
 
 on:
-  schedule:
-    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
-  check:
-    name: Check for new commits
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-      fpc_version: ${{ steps.check.outputs.fpc_version }}
-      fpc_revision: ${{ steps.check.outputs.fpc_revision }}
-      fpc_short_hash: ${{ steps.check.outputs.fpc_short_hash }}
-      fpc_commit: ${{ steps.check.outputs.fpc_commit }}
-      fpc_commit_title: ${{ steps.check.outputs.fpc_commit_title }}
-    steps:
-      - name: Check FPC trunk for changes
-        id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git clone https://gitlab.com/freepascal.org/fpc/source.git fpc-src
-
-          fpc_revision=$(git -C fpc-src describe)
-          fpc_short_hash_early=$(echo "${fpc_revision}" | grep -o 'g[0-9a-f]*$')
-          last_short_hash=$(gh release list --repo ${{ github.repository }} --limit 1 --json tagName \
-            --jq '.[0].tagName' 2>/dev/null | grep -o 'g[0-9a-f]*$' || true)
-
-          changed=true
-          if [[ "${{ github.event_name }}" != "workflow_dispatch" && "${fpc_short_hash_early}" == "${last_short_hash}" ]]; then
-            changed=false
-          fi
-
-          if [[ "${changed}" == "false" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "fpc_revision=${fpc_revision}" >> "$GITHUB_OUTPUT"
-            fpc_version=$(grep -m1 'PACKAGE_VERSION' fpc-src/Makefile | sed 's/.*PACKAGE_VERSION=//')
-            echo "fpc_version=${fpc_version}" >> "$GITHUB_OUTPUT"
-            fpc_short_hash=$(echo "${fpc_revision}" | grep -o 'g[0-9a-f]*$')
-            echo "fpc_short_hash=${fpc_short_hash}" >> "$GITHUB_OUTPUT"
-            echo "fpc_commit=$(git -C fpc-src log -1 --format=%H)" >> "$GITHUB_OUTPUT"
-            echo "fpc_commit_title=$(git -C fpc-src log -1 --format=%s)" >> "$GITHUB_OUTPUT"
-          fi
-
   build:
-    name: Build FPC (${{ matrix.cpu }})
-    needs: check
-    if: needs.check.outputs.changed == 'true'
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - cpu: aarch64
-            runner: macos-latest
-          - cpu: x86_64
-            runner: macos-15-intel
+    name: Build Free Pascal
+    runs-on: macos-15
+    outputs:
+      fpc_version: ${{ steps.clone.outputs.fpc_version }}
+      fpc_revision: ${{ steps.clone.outputs.fpc_revision }}
+      fpc_commit: ${{ steps.clone.outputs.fpc_commit }}
+      fpc_commit_title: ${{ steps.clone.outputs.fpc_commit_title }}
     steps:
       - name: Install bootstrap compiler
         run: |
-          curl -L -o bootstrap.dmg \
-            https://downloads.freepascal.org/fpc/dist/3.2.2/i386-macosx/fpc-3.2.2.intelarm64-macosx.dmg
+          curl -L -o bootstrap.dmg https://downloads.freepascal.org/fpc/dist/3.2.2/i386-macosx/fpc-3.2.2.intelarm64-macosx.dmg
           hdiutil attach bootstrap.dmg -mountpoint /Volumes/fpc-bootstrap
           pkg_path="/Volumes/fpc-bootstrap/fpc-3.2.2-intelarm64-macosx.mpkg/Contents/Packages/fpc-3.2.2-intelarm64-macosx.pkg"
           pkgutil --expand-full "${pkg_path}" bootstrap-contents
           sudo cp -r bootstrap-contents/Payload/usr/local/. /usr/local/
           hdiutil detach /Volumes/fpc-bootstrap
 
-      - name: Clone FPC source
+      - name: Clone Free Pascal source
+        id: clone
         run: |
-          git clone https://gitlab.com/freepascal.org/fpc/source.git fpc-src
+          git clone --depth=1 --branch=release_3_2_4-branch https://github.com/fpc/FPCSource.git fpc-src
 
-      - name: Build FPC
+          fpc_revision=$(git -C fpc-src log -1 --format=%h)
+          echo "fpc_revision=${fpc_revision}" >> "$GITHUB_OUTPUT"
+          fpc_version=$(grep -m1 'PACKAGE_VERSION' fpc-src/Makefile | sed 's/.*PACKAGE_VERSION=//')
+          echo "fpc_version=${fpc_version}" >> "$GITHUB_OUTPUT"
+          echo "fpc_commit=$(git -C fpc-src log -1 --format=%H)" >> "$GITHUB_OUTPUT"
+          echo "fpc_commit_title=$(git -C fpc-src log -1 --format=%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Free Pascal compiler
         run: |
           sdk="$(xcrun --show-sdk-path)"
           cd fpc-src/compiler
           make revision.inc
           cd ..
           opt="-Fl${sdk}/usr/lib -XR${sdk} -WM11.0 -Sg -vw-n-h-l-d-u-t-p-c- -dREVINC"
-          if [[ "${{ matrix.cpu }}" == "aarch64" ]]; then
-            make build PP=/usr/local/bin/ppca64 OPT="${opt}"
-            make install PP=/usr/local/bin/ppca64 OPT="${opt}" PREFIX="${{ runner.temp }}/fpc-install/usr/local"
-          else
-            make build PP=/usr/local/bin/ppcx64 OPT="${opt}"
-            make install PP=/usr/local/bin/ppcx64 OPT="${opt}" PREFIX="${{ runner.temp }}/fpc-install/usr/local"
-          fi
 
-      - name: Test compiler
-        run: |
-          sdk="$(xcrun --show-sdk-path)"
-          cat > /tmp/hello.pas << 'EOF'
-          program Hello;
-          uses SysUtils;
-          begin
-            writeln(Format('Hello FPC %s', [{$I %FPCVERSION%}]))
-          end.
-          EOF
-          if [[ "${{ matrix.cpu }}" == "aarch64" ]]; then
-            /usr/local/bin/ppca64 /tmp/hello.pas -o/tmp/hello -XR"${sdk}"
-          else
-            /usr/local/bin/ppcx64 /tmp/hello.pas -o/tmp/hello -XR"${sdk}"
-          fi
-          /tmp/hello
+          # Build and install aarch64 compiler
+          make build PP=/usr/local/bin/ppca64 OPT="${opt}"
+          make install PP=/usr/local/bin/ppca64 OPT="${opt}" PREFIX="${{ runner.temp }}/fpc-install/usr/local"
+          ln -s ../lib/fpc/3.2.4/ppca64 "${{ runner.temp }}/fpc-install/usr/local/bin/ppca64"
+
+          # Build and install x86_64 cross-compiler
+          make build CPU_TARGET=x86_64 PP=/usr/local/bin/ppca64 OPT="${opt} -dFPC_SOFT_FPUX80"
+          make crossinstall CPU_TARGET=x86_64 PP=/usr/local/bin/ppca64 OPT="${opt}" PREFIX="${{ runner.temp }}/fpc-install/usr/local"
+          ln -s ../lib/fpc/3.2.4/ppcrossx64 "${{ runner.temp }}/fpc-install/usr/local/bin/ppcx64"
 
       - name: Create pkg
         run: |
           pkgbuild \
             --root "${{ runner.temp }}/fpc-install" \
-            --identifier org.freepascal.fpc.trunk.${{ matrix.cpu }} \
-            --version ${{ needs.check.outputs.fpc_version }} \
+            --identifier org.freepascal.fpc.3_2_x.aarch64 \
+            --version ${{ steps.clone.outputs.fpc_version }} \
             --install-location / \
-            fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-${{ matrix.cpu }}-macosx.pkg
+            fpc-${{ steps.clone.outputs.fpc_version }}-aarch64-macosx.pkg
 
-      - name: Create DMG
+      - name: Create dmg
         run: |
-          pkg="fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-${{ matrix.cpu }}-macosx.pkg"
-          vol="fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-${{ matrix.cpu }}-macosx"
+          pkg="fpc-${{ steps.clone.outputs.fpc_version }}-aarch64-macosx.pkg"
+          vol="fpc-${{ steps.clone.outputs.fpc_version }}-aarch64-macosx"
           dmg_rw="${vol}-rw.dmg"
           dmg_out="${vol}.dmg"
           pkg_size=$(du -sm "${pkg}" | cut -f1)
@@ -133,12 +79,12 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: fpc-trunk-${{ matrix.cpu }}
-          path: fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-${{ matrix.cpu }}-macosx.dmg
+          name: fpc-3_2_x-aarch64+cross-x86_64
+          path: fpc-${{ steps.clone.outputs.fpc_version }}-aarch64-macosx.dmg
 
   release:
     name: Publish release
-    needs: [check, build]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -146,39 +92,30 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: fpc-trunk-*
+          pattern: fpc-3_2_x-*
           merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}"
+          tag="v${{ needs.build.outputs.fpc_version }}"
           prev_tag=$(gh release list --repo ${{ github.repository }} --limit 1 --json tagName \
             --jq '.[0].tagName' 2>/dev/null || true)
           if [[ -n "${prev_tag}" && "${prev_tag}" != "${tag}" ]]; then
             gh release edit "${prev_tag}" --repo ${{ github.repository }} --prerelease --no-latest 2>/dev/null || true
           fi
-          full_hash="${{ needs.check.outputs.fpc_commit }}"
-          short_hash="${full_hash:0:8}"
+          full_hash="${{ needs.build.outputs.fpc_commit }}"
+          short_hash="${{ needs.build.outputs.fpc_revision }}"
           commit_url="https://gitlab.com/freepascal.org/fpc/source/-/commit/${full_hash}"
-          printf 'FPC source commit: [%s](%s) %s\n' \
+          printf 'Free Pascal source commit: [%s](%s) %s\n' \
             "${short_hash}" \
             "${commit_url}" \
-            "${{ needs.check.outputs.fpc_commit_title }}" > /tmp/release-notes.txt
+            "${{ needs.build.outputs.fpc_commit_title }}" > /tmp/release-notes.txt
           gh release delete "${tag}" --repo ${{ github.repository }} --yes 2>/dev/null || true
           gh release create "${tag}" \
             --repo ${{ github.repository }} \
-            --title "FPC ${{ needs.check.outputs.fpc_version }} trunk (${{ needs.check.outputs.fpc_revision }})" \
+            --title "Free Pascal ${{ needs.build.outputs.fpc_version }} (${{ needs.build.outputs.fpc_revision }})" \
             --notes-file /tmp/release-notes.txt \
             --latest \
-            fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-aarch64-macosx.dmg \
-            fpc-${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}-x86_64-macosx.dmg
-
-  update-cask:
-    name: Update Homebrew cask
-    needs: [check, release]
-    uses: ./.github/workflows/update-cask.yml
-    with:
-      tag: v${{ needs.check.outputs.fpc_version }}-${{ needs.check.outputs.fpc_short_hash }}
-    secrets: inherit
+            fpc-${{ needs.build.outputs.fpc_version }}-aarch64-macosx.dmg
